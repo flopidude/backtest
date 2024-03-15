@@ -9,6 +9,7 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 import json
 import os
+from pytz import UTC
 
 class BinanceDataProvider:
     TICKER_PATH = "./tickers"
@@ -35,16 +36,17 @@ class BinanceDataProvider:
                 ticker_path = os.path.join(tickers_dir, f"{ticker}-{timeframe}.csv")
 
                 try:
-                    self.cached_dataframes[timeframe][ticker] = pl.read_csv(ticker_path, try_parse_dates=True).with_columns(
+                    self.cached_dataframes[timeframe][pair] = pl.read_csv(ticker_path, try_parse_dates=True).with_columns(
                         pl.col("date").cast(pl.Datetime(time_unit="ms", time_zone="UTC")))
                     # print(existing_data)
                 except Exception as e:
-                    self.cached_dataframes[timeframe][ticker] = None
-                    print(f"Error loading existing data for {ticker}: {e}")
+                    self.cached_dataframes[timeframe][pair] = None
+                    print(f"Error loading existing data for {pair}: {e}")
     async def update_tickers(self, pairs: [str], timeframes: [str], fallback_starting_date=None):
         tickers_dir = os.path.realpath(self.TICKER_PATH)
+        to_datetime = datetime.combine(date.today(), datetime.min.time())
         if fallback_starting_date is None:
-            fallback_starting_date = date.today() - relativedelta(years=2)
+            fallback_starting_date = datetime.combine(date.today() - relativedelta(years=2), datetime.min.time())
         for pair in pairs:
             ticker = pair.replace("/USDT:USDT", "USDT")
             # print(ticker)
@@ -53,23 +55,63 @@ class BinanceDataProvider:
                 # Load existing data
 
                 # Get the last available date
-                if self.cached_dataframes[timeframe][ticker] is not None and not self.cached_dataframes[timeframe][ticker].is_empty():
-                    last_datetime, _ = self.fetch_dataframe_constraints(ticker, timeframe)
-                    last_date = last_datetime.date()
+                if self.cached_dataframes[timeframe][pair] is not None and not self.cached_dataframes[timeframe][pair].is_empty():
+                    _, last_date = self.fetch_dataframe_constraints(pair, timeframe)
+                    # last_date = last_datetime.date()
                 else:
                     last_date = fallback_starting_date
 
                 # Download new data and merge with existing data
-                new_data = await self.data_downloader.download_one_ticker(ticker, last_date, date.today(), timeframe)
+                new_data = await self.data_downloader.download_one_ticker(ticker, last_date, to_datetime, timeframe)
                 if new_data is not None and not new_data.is_empty():
-                    if self.cached_dataframes[timeframe][ticker] is not None and not self.cached_dataframes[timeframe][ticker].is_empty():
-                        self.cached_dataframes[timeframe][ticker] = pl.concat([self.cached_dataframes[timeframe][ticker], new_data], how="vertical").unique(subset=["date"])
+                    if self.cached_dataframes[timeframe][pair] is not None and not self.cached_dataframes[timeframe][pair].is_empty():
+                        self.cached_dataframes[timeframe][pair] = pl.concat([self.cached_dataframes[timeframe][pair], new_data], how="vertical").unique(subset=["date"]).sort("date")
                     else:
-                        self.cached_dataframes[timeframe][ticker] = new_data
-                    self.cached_dataframes[timeframe][ticker].write_csv(ticker_path)
-                    print(f"Updated data for {ticker}")
+                        self.cached_dataframes[timeframe][pair] = new_data
+                    self.cached_dataframes[timeframe][pair].write_csv(ticker_path)
+                    print(f"Updated data for {pair}")
                 else:
-                    print(f"No new data available for {ticker}")
+                    print(f"No new data available for {pair}")
+
+    async def update_tickers_async(self, pairs: [str], timeframes: [str], fallback_starting_date=None):
+        tickers_dir = os.path.realpath(self.TICKER_PATH)
+        today_datetime = datetime.combine(date.today(), datetime.min.time())
+        if fallback_starting_date is None:
+            fallback_starting_date = datetime.combine(date.today() - relativedelta(years=2), datetime.min.time())
+        tasks = []
+        properties = []
+        for timeframe in timeframes:
+            # print(ticker)
+            for pair in pairs:
+                ticker = pair.replace("/USDT:USDT", "USDT")
+                # ticker_path = os.path.join(tickers_dir, f"{ticker}-{timeframe}.csv")
+                # Load existing data
+
+                # Get the last available date
+                if self.cached_dataframes[timeframe][pair] is not None and not self.cached_dataframes[timeframe][pair].is_empty():
+                    _, last_date = self.fetch_dataframe_constraints(pair, timeframe)
+                    # last_date = last_datetime.date()
+                else:
+                    last_date = fallback_starting_date
+
+                # Download new data and merge with existing data
+                task = (asyncio.create_task(self.data_downloader.download_one_ticker(ticker, last_date, today_datetime, timeframe)))
+                tasks.append(task)
+                properties.append((pair, timeframe))
+        tasks = asyncio.as_completed(tasks)
+        for coroutine, (pair, timeframe) in zip(tasks, properties):
+            new_data = await coroutine
+            ticker = pair.replace("/USDT:USDT", "USDT")
+            ticker_path = os.path.join(tickers_dir, f"{ticker}-{timeframe}.csv")
+            if new_data is not None and not new_data.is_empty():
+                if self.cached_dataframes[timeframe][pair] is not None and not self.cached_dataframes[timeframe][pair].is_empty():
+                    self.cached_dataframes[timeframe][pair] = pl.concat([self.cached_dataframes[timeframe][pair], new_data], how="vertical").unique(subset=["date"]).sort("date")
+                else:
+                    self.cached_dataframes[timeframe][pair] = new_data
+                self.cached_dataframes[timeframe][pair].write_csv(ticker_path)
+                print(f"Updated data for {pair}")
+            else:
+                print(f"No new data available for {pair}")
     def __init__(self, pairlist: [str], timeframes: [str]):
         self.data_downloader = BinanceDataDownloader()
         self.pairlist = pairlist
@@ -84,7 +126,7 @@ class BinanceDataDownloader:
     __minimum_achieved_date = None
 
 
-    async def download_and_process(self, session, url: str, ticker: str, date_of_cycle: date, is_csv = True):
+    async def download_and_process(self, session, url: str, ticker: str, date_of_cycle: datetime, is_csv = True):
         DEFAULT_COLUMNS = ['open_time', 'open', 'high', 'low', 'close', 'volume',
                                                           'close_time', 'quote_volume', 'count', 'taker_buy_volume',
                                                           'taker_buy_quote_volume', 'ignore']
@@ -110,7 +152,7 @@ class BinanceDataDownloader:
                 df = df.filter(pl.col("ignore") == 0).rename({"open_time": "date"}).drop(
                     ["close_time", "ignore", "quote_volume", "taker_buy_quote_volume"]).with_columns(
                     (pl.col("date").cast(pl.Datetime(time_unit="ms")).dt.replace_time_zone("UTC").alias("date")))
-                print(df)
+                # print(df)
                 if self.pbar is not None:
                     self.pbar.update(1)
                 if self.__minimum_achieved_date is None or date_of_cycle < self.__minimum_achieved_date:
@@ -120,7 +162,7 @@ class BinanceDataDownloader:
                 raise ConnectionError(response.status_code)
         except Exception as e:
 
-            if self.__minimum_achieved_date is not None and (not date.today() == date_of_cycle) and self.__minimum_achieved_date < date_of_cycle:
+            if self.__minimum_achieved_date is not None and (not date.today() == date_of_cycle.date()) and self.__minimum_achieved_date < date_of_cycle:
                 print(date.today(), date_of_cycle)
                 raise Exception(f"A hole in the cycle has been found, minimum achieved date is {self.__minimum_achieved_date}, url: {url.split('/klines')[1]}, {e}")
             if self.pbar is not None:
@@ -136,25 +178,35 @@ class BinanceDataDownloader:
                 print(f"Error: Failed to download data for {ticker} from {url}")
             return pl.DataFrame()
 
-    async def download_one_ticker(self, ticker, start_date, end_date, timeframe, spot=False):
+    async def download_one_ticker(self, ticker, start_date: datetime, end_date: datetime, timeframe, spot=False):
+        # Write some code to ensure that start_date is smaller than end_date and make them both timezone-aware using UTC
+        start_date = start_date.replace(tzinfo=UTC)
+        end_date = end_date.replace(tzinfo=UTC)
+        end_date_plus_one = end_date + timedelta(days=1)
+
+        if start_date > end_date_plus_one:
+            raise ValueError(f"start_date({start_date}) must be smaller than end_date({end_date})")
+
         prefix = "spot" if spot else "futures/um"
         self.__minimum_achieved_date = None
         if ticker not in self.downloadable_ticker_information["symbolList"]:
             raise Exception(f"Ticker {ticker} is not downloadable")
         async with httpx.AsyncClient() as session:
             tasks = []
-            current_date: date = start_date
-            end_date_plus_one = end_date + timedelta(days=1)
+            current_date = start_date
+
             while current_date < end_date_plus_one:
                 year, month, day = current_date.year, current_date.month, current_date.day
-                if current_date == date.today():
+                if current_date.date() >= date.today() - timedelta(days=1):
+                    start_time = current_date.timestamp() * 1000
+                    end_time = (current_date + timedelta(minutes=1000)).timestamp() * 1000
                     if spot:
-                        url = f"https://data-api.binance.vision/api/v3/klines?symbol={ticker}&interval={timeframe}&limit=1000"
+                        url = f"https://data-api.binance.vision/api/v3/klines?symbol={ticker}&interval={timeframe}&limit=1000&startTime={start_time}&endTime={end_time}"
                     else:
-                        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={ticker}&interval={timeframe}&limit=1000"
+                        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={ticker}&interval={timeframe}&limit=1000&startTime={start_time}&endTime={end_time}"
                     task = asyncio.create_task(self.download_and_process(session, url, ticker, current_date, False))
                     tasks.append(task)
-                    current_date += timedelta(days=1)
+                    current_date += timedelta(minutes=1000)
                 elif current_date.month == end_date.month and current_date.year == end_date.year:
                     # Download daily data for the ending month
                     url = f"https://data.binance.vision/data/{prefix}/daily/klines/{ticker}/{timeframe}/{ticker}-{timeframe}-{year}-{month:02d}-{day:02d}.zip"
@@ -170,7 +222,7 @@ class BinanceDataDownloader:
                     # add one month to the current date setting the day to be the first day of the month
                     current_date = current_date.replace(day=1) + relativedelta(months=1)
             if self.use_pbar:
-                self.pbar = tqdm.tqdm(total=len(tasks), desc=f'Downloading {ticker}')
+                self.pbar = tqdm.tqdm(total=len(tasks), desc=f'DOWN {ticker}-{timeframe}, {start_date.date()} to {end_date.date()}')
 
             dfs = await asyncio.gather(*tasks)
             combined_df = pl.concat([i for i in dfs if i.height > 0], how="vertical")
