@@ -1,8 +1,8 @@
 # A very simple fast fetcher for Binance historical market data.
 
-#### By using a combination of historical CSV files and API calls this tiny library can fetch data significantly faster than alternatives fetching just from the API while avoiding rate limiting.
+#### By using a combination of historical CSV files and API calls this tiny library can avoid rate limits and fetch data significantly faster than alternatives that fetch just from the API.
 
-here is a very simple benchmark for you :)
+here is a benchmark for you :)
 
 | Downloaded tickers                                                                       | Time range        | **HistoricalBinance** | **Freqtrade** |
 |------------------------------------------------------------------------------------------|-------------------|-----------------------|---------------|
@@ -28,9 +28,9 @@ from binance_data import BinanceDataProvider
  
 async def binance_data_provider_example(self):
     provider = BinanceDataProvider(["ETH/USDT:USDT", "BTC/USDT:USDT", "FET/USDT:USDT", "RUNE/USDT:USDT", "SOL/USDT:USDT", "OP/USDT:USDT"], ["1m"])
-    asyncio.run(provider.update_tickers_async(["ETH/USDT:USDT", "BTC/USDT:USDT", "FET/USDT:USDT", "RUNE/USDT:USDT", "SOL/USDT:USDT", "OP/USDT:USDT"], ["1m"], datetime(2023, 2, 1)))
+    await provider.update_tickers_async(["ETH/USDT:USDT", "BTC/USDT:USDT", "FET/USDT:USDT", "RUNE/USDT:USDT", "SOL/USDT:USDT", "OP/USDT:USDT"], ["1m"], datetime(2023, 2, 1))
     print(provider.cached_dataframes["1m"]["ETHUSDT"])
 ```
 This will print out a **polars** dataframe with columns 
 `'date', 'open', 'high', 'low', 'close', 'volume',
-                           'count', 'taker_buy_volume'`, however if you wish you can modify the code to leave the 'ignore', 'taker_buy_quote_volume' and 'quote_volume' columns.
+                           'count', 'taker_buy_volume'`, however if you wish you can modify the code to keep the 'ignore', 'taker_buy_quote_volume' and 'quote_volume' fetched from Binance.
