@@ -2,3 +2,9 @@
 machinet.conf
 tickers/
 .idea/
+
+src/historical_binance.egg-info/
+
+build/
+
+dist/
