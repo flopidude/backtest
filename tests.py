@@ -57,9 +57,4 @@ class TestBinanceDataDownloader(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    # from historical_binance import BinanceDataProvider
-    #
-    # provider = BinanceDataProvider(["ETH/USDT:USDT", "BTC/USDT:USDT"], ["1m"], "./data/futures",
-    #                                "{currency}_USDT_USDT-{timeframe}.csv")
-    # asyncio.run(provider.update_tickers_async(["ETH/USDT:USDT", "BTC/USDT:USDT"], ["1m"], datetime(2022, 12, 7)))
     unittest.main()

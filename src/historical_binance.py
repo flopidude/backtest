@@ -124,7 +124,11 @@ class BinanceDataProvider:
                 properties.append((pair, timeframe))
         tasks = asyncio.as_completed(tasks)
         for coroutine, (pair, timeframe) in zip(tasks, properties):
-            new_data = await coroutine
+            try:
+                new_data = await coroutine
+            except Exception as e:
+                print(e)
+                new_data = None
             ticker = pair.replace("/USDT:USDT", "USDT")
             basecur = pair.split("/")[0].replace("USDT", "")
             ticker_path = self.TICKER_NAME.format(currency=basecur, ticker=ticker, timeframe=timeframe)
@@ -139,6 +143,7 @@ class BinanceDataProvider:
                 self.cached_dataframes[timeframe][pair].write_csv(ticker_path)
                 # print(f"Updated data for {pair}")
             else:
+                self.cached_dataframes[timeframe][pair] = None
                 print(f"No new data available for {pair}")
 
     def __init__(self, pairlist: [str], timeframes: [str], ticker_path: str = "./tickers",
