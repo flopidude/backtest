@@ -79,7 +79,8 @@ class BinanceDataProvider:
                     download_from = fallback_starting_date
 
                 # Download new data and merge with existing data
-                new_data = await self.data_downloader.download_one_ticker(ticker, download_from, to_datetime, timeframe)
+                _, _, new_data = await self.data_downloader.download_one_ticker(ticker, download_from, to_datetime,
+                                                                                timeframe)
                 if new_data is not None and not new_data.is_empty():
                     if self.cached_dataframes[timeframe][pair] is not None and not self.cached_dataframes[timeframe][
                         pair].is_empty():
@@ -107,7 +108,6 @@ class BinanceDataProvider:
         else:
             fallback_starting_date = fallback_starting_date.replace(tzinfo=UTC)
         tasks = []
-        properties = []
         for timeframe in timeframes:
             for pair in pairs:
                 ticker = pair.replace("/USDT:USDT", "USDT")
@@ -126,15 +126,14 @@ class BinanceDataProvider:
                     self.data_downloader.download_one_ticker(ticker, download_from, today_datetime, timeframe,
                                                              tqdm_position=len(tasks) - 1)))
                 tasks.append(task)
-                properties.append((pair, timeframe))
-        tasks = asyncio.as_completed(tasks)
-        for coroutine, (pair, timeframe) in zip(tasks, properties):
+        for coroutine in asyncio.as_completed(tasks):
             try:
-                new_data = await coroutine
+                ticker, timeframe, new_data = await coroutine
             except Exception as e:
                 print(e)
                 new_data = None
-            ticker = pair.replace("/USDT:USDT", "USDT")
+                continue
+            pair = ticker.replace("USDT", "/USDT:USDT")
             basecur = pair.split("/")[0].replace("USDT", "")
             ticker_path = self.TICKER_NAME.format(currency=basecur, ticker=ticker, timeframe=timeframe)
             if new_data is not None and not new_data.is_empty():
@@ -299,7 +298,7 @@ class BinanceDataDownloader:
             if self.use_pbar:
                 self.pbars[tqdm_position].close()
                 del self.pbars[tqdm_position]
-            return combined_df
+            return ticker, timeframe, combined_df
 
     async def __fetch_downloadable_tickers(self):
         async with httpx.AsyncClient() as session:
