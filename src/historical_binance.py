@@ -209,7 +209,7 @@ class BinanceDataDownloader:
                 else:
                     raise ConnectionError(response.status_code)
             except Exception as e:
-                del response
+                # del response
                 retry_count += 1
                 if self.pbars[tqdm_position] is not None:
                     if self.__minimum_achieved_date is not None and (
