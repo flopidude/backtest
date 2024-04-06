@@ -46,7 +46,7 @@ class BinanceDataProvider:
 
                 try:
                     print(f"Loading existing data for {pair} on {timeframe} timeframe.")
-                    self.cached_dataframes[timeframe][pair] = pl.read_ipc(ticker_path).with_columns(
+                    self.cached_dataframes[timeframe][pair] = pl.read_ipc(ticker_path, use_pyarrow=False).with_columns(
                         pl.col("date").cast(pl.Datetime(time_unit="ms", time_zone="UTC")))
                 except Exception as e:
                     self.cached_dataframes[timeframe][pair] = None
@@ -89,7 +89,7 @@ class BinanceDataProvider:
                             subset=["date"]).sort("date")
                     else:
                         self.cached_dataframes[timeframe][pair] = new_data
-                    self.cached_dataframes[timeframe][pair].write_ipc(ticker_path)
+                    self.cached_dataframes[timeframe][pair].write_ipc(ticker_path, future=True)
                     # print(f"Updated data for {pair}")
                 else:
                     print(f"No new data available for {pair}")
@@ -144,7 +144,7 @@ class BinanceDataProvider:
                         subset=["date"]).sort("date")
                 else:
                     self.cached_dataframes[timeframe][pair] = new_data
-                self.cached_dataframes[timeframe][pair].write_ipc(ticker_path)
+                self.cached_dataframes[timeframe][pair].write_ipc(ticker_path, future=True)
                 # print(f"Updated data for {pair}")
             else:
                 self.cached_dataframes[timeframe][pair] = None
@@ -165,6 +165,7 @@ class BinanceDataDownloader:
     pbars = None
     use_pbar = True
     __minimum_achieved_date = None
+    ignore = []
 
     async def download_and_process(self, session, url: str, ticker: str, date_of_cycle: datetime, is_csv=True,
                                    tqdm_position=0):
@@ -197,7 +198,7 @@ class BinanceDataDownloader:
                     df = df.with_columns((pl.col(coln).cast(pl.Float64) for coln in DEFAULT_COLUMNS if
                                           not coln in ["open_time", "close_time"])).filter(
                         pl.col("ignore") == 0).rename({"open_time": "date"}).drop(
-                        ["close_time", "ignore", "quote_volume", "taker_buy_quote_volume"]).with_columns(
+                        ["close_time", "ignore", "quote_volume", "taker_buy_quote_volume"] + self.ignore).with_columns(
                         (pl.col("date").cast(pl.Datetime(time_unit="ms")).dt.replace_time_zone("UTC").alias("date")))
                     # print(df)
                     if tqdm_position in self.pbars:
@@ -329,7 +330,9 @@ class BinanceDataDownloader:
                 raise Exception(f"Failed to fetch downloadable tickers, {result}")
             return result["data"]
 
-    def __init__(self, use_pbar=True):
+    def __init__(self, use_pbar=True, ignore_extras=True):
+        if ignore_extras:
+            self.ignore = ["taker_buy_volume", "count"]
         self.max_retry_count = None
         self.use_pbar = use_pbar
         self.pbars = {}
