@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="historical_binance",                     # This is the name of the package
-    version="0.1.7.7",                        # The initial release version
+    version="0.1.7.8",                        # The initial release version
     author="Denkik",                     # Full name of the author
     description="A very fast downloader for Binance historical data",
     long_description=long_description,      # Long description read from the the readme file
