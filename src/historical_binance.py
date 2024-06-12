@@ -1,6 +1,5 @@
 import asyncio
 import httpx
-import tqdm
 import zipfile
 from io import BytesIO
 from datetime import datetime, timedelta, date
@@ -8,6 +7,8 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 import os
 from pytz import UTC
+import logging
+logger = logging.getLogger(__name__)
 
 
 class BinanceDataProvider:
@@ -45,12 +46,12 @@ class BinanceDataProvider:
                 ticker_path = self.TICKER_NAME.format(currency=basecur, timeframe=timeframe, ticker=ticker)
 
                 try:
-                    print(f"Loading existing data for {pair} on {timeframe} timeframe.")
+                    logger.info(f"Loading existing data for {pair} on {timeframe} timeframe.")
                     self.cached_dataframes[timeframe][pair] = pl.read_ipc(ticker_path, use_pyarrow=False).with_columns(
                         pl.col("date").cast(pl.Datetime(time_unit="ms", time_zone="UTC")))
                 except Exception as e:
                     self.cached_dataframes[timeframe][pair] = None
-                    print(f"Error loading existing data for {pair}: {e}")
+                    logger.warning(f"Error loading existing data for {pair}: {e}")
 
     async def update_tickers(self, pairs: [str], timeframes: [str], fallback_starting_date: datetime = None):
         """
@@ -123,14 +124,13 @@ class BinanceDataProvider:
 
                 # Download new data and merge with existing data
                 task = (asyncio.create_task(
-                    self.data_downloader.download_one_ticker(ticker, download_from, today_datetime, timeframe,
-                                                             tqdm_position=len(tasks) - 1)))
+                    self.data_downloader.download_one_ticker(ticker, download_from, today_datetime, timeframe)))
                 tasks.append(task)
         for coroutine in asyncio.as_completed(tasks):
             try:
                 ticker, timeframe, new_data = await coroutine
             except Exception as e:
-                print(e)
+                logger.error(e)
                 new_data = None
                 continue
             pair = ticker.replace("USDT", "/USDT:USDT")
@@ -163,77 +163,64 @@ class BinanceDataProvider:
 class BinanceDataDownloader:
     downloadable_ticker_information = {}
     pbars = None
-    use_pbar = True
+    # use_pbar = True
     __minimum_achieved_date = None
     ignore = []
 
-    async def download_and_process(self, session, url: str, ticker: str, date_of_cycle: datetime, is_csv=True,
-                                   tqdm_position=0):
+    async def download_and_process(self, url: str, ticker: str, date_of_cycle: datetime, is_csv=True):
         DEFAULT_COLUMNS = ['open_time', 'open', 'high', 'low', 'close', 'volume',
                            'close_time', 'quote_volume', 'count', 'taker_buy_volume',
                            'taker_buy_quote_volume', 'ignore']
         retry_count = 0
         while retry_count < self.max_retry_count:
             try:
-                response = await session.get(url)
-                if response.status_code == 200:
-                    if is_csv:
-                        data = response.read()
-                        with zipfile.ZipFile(BytesIO(data)) as zip_file:
-                            with zip_file.open(zip_file.namelist()[0]) as csv_file:
-                                first_line = csv_file.readline().decode("utf-8").strip()
-                                csv_file.seek(0)  # Reset the file pointer to the beginning
+                async with httpx.AsyncClient() as session:
+                    response = await session.get(url)
+                    if response.status_code == 200:
+                        if is_csv:
+                            data = response.read()
+                            with zipfile.ZipFile(BytesIO(data)) as zip_file:
+                                with zip_file.open(zip_file.namelist()[0]) as csv_file:
+                                    first_line = csv_file.readline().decode("utf-8").strip()
+                                    csv_file.seek(0)  # Reset the file pointer to the beginning
 
-                                if "open_time" in first_line:
-                                    df = pl.read_csv(csv_file.read())
-                                else:
-                                    df = pl.read_csv(csv_file.read(), has_header=False, new_columns=DEFAULT_COLUMNS)
-                                del csv_file
-                        del data
+                                    if "open_time" in first_line:
+                                        df = pl.read_csv(csv_file.read())
+                                    else:
+                                        df = pl.read_csv(csv_file.read(), has_header=False, new_columns=DEFAULT_COLUMNS)
+                                    del csv_file
+                            del data
+                        else:
+                            data = response.json()
+                            df = pl.DataFrame(data)
+                            del data
+                            df.columns = DEFAULT_COLUMNS
+                        df = df.with_columns((pl.col(coln).cast(pl.Float64) for coln in DEFAULT_COLUMNS if
+                                              not coln in ["open_time", "close_time"])).filter(
+                            pl.col("ignore") == 0).rename({"open_time": "date"}).drop(
+                            ["close_time", "ignore", "quote_volume", "taker_buy_quote_volume"] + self.ignore).with_columns(
+                            (pl.col("date").cast(pl.Datetime(time_unit="ms")).dt.replace_time_zone("UTC").alias("date")))
+                        if self.__minimum_achieved_date is None or date_of_cycle < self.__minimum_achieved_date:
+                            self.__minimum_achieved_date = date_of_cycle
+                        del response
+                        return df
                     else:
-                        data = response.json()
-                        df = pl.DataFrame(data)
-                        del data
-                        df.columns = DEFAULT_COLUMNS
-                    df = df.with_columns((pl.col(coln).cast(pl.Float64) for coln in DEFAULT_COLUMNS if
-                                          not coln in ["open_time", "close_time"])).filter(
-                        pl.col("ignore") == 0).rename({"open_time": "date"}).drop(
-                        ["close_time", "ignore", "quote_volume", "taker_buy_quote_volume"] + self.ignore).with_columns(
-                        (pl.col("date").cast(pl.Datetime(time_unit="ms")).dt.replace_time_zone("UTC").alias("date")))
-                    # print(df)
-                    if tqdm_position in self.pbars:
-                        self.pbars[tqdm_position].update(1)
-                    if self.__minimum_achieved_date is None or date_of_cycle < self.__minimum_achieved_date:
-                        self.__minimum_achieved_date = date_of_cycle
-                    del response
-                    return df
-                else:
-                    raise ConnectionError(response.status_code)
+                        raise ConnectionError(response.status_code)
             except Exception as e:
                 # del response
                 retry_count += 1
-                if self.pbars[tqdm_position] is not None:
-                    if self.__minimum_achieved_date is not None and (
-                            not date.today() == date_of_cycle.date()) and self.__minimum_achieved_date < date_of_cycle:
-                        self.pbars[tqdm_position].write(
-                            f"A hole in the cycle has been found, minimum achieved date is {self.__minimum_achieved_date}, url: {url.split('/klines')[1]}, {e}")
-                        if retry_count == self.max_retry_count:
-                            raise Exception(
-                                f"Hole in the data {self.__minimum_achieved_date}/{date_of_cycle}, url: {url.split('/klines')[1]}, {e}")
-                    self.pbars[tqdm_position].write(
-                        f"Error({retry_count}/{self.max_retry_count} retries): {url.split('/klines')[1]}, {e}")
-                    self.pbars[tqdm_position].update(1)
-                    if not hasattr(self.pbars[tqdm_position], "error_count"):
-                        self.pbars[tqdm_position].error_count = 1
-                    else:
-                        self.pbars[tqdm_position].error_count += 1
-                    self.pbars[tqdm_position].set_postfix_str(f"Error Count: {self.pbars[tqdm_position].error_count}")
-                else:
-                    print(f"Error: Failed to download data for {ticker} from {url}")
-        return pl.DataFrame()
+                logger.warning(f"Error({retry_count}/{self.max_retry_count} retries): {url.split('/klines')[1]}, {e}")
+                if self.__minimum_achieved_date is not None and (
+                        not date.today() == date_of_cycle.date()) and self.__minimum_achieved_date < date_of_cycle:
+                    logger.error(
+                        f"A hole in the cycle has been found, minimum achieved date is {self.__minimum_achieved_date}, url: {url.split('/klines')[1]}, {e}")
+                    if retry_count == self.max_retry_count:
+                        raise Exception(
+                            f"Hole in the data {self.__minimum_achieved_date}/{date_of_cycle}, url: {url.split('/klines')[1]}, {e}")
+        return None
 
     async def download_one_ticker(self, ticker, start_date: datetime, end_date: datetime, timeframe, spot=False,
-                                  max_retry_count=5, tqdm_position=0):
+                                  max_retry_count=5):
         if self.downloadable_ticker_information is None:
             self.downloadable_ticker_information = await self.__fetch_downloadable_tickers()
         self.max_retry_count = max_retry_count
@@ -249,57 +236,58 @@ class BinanceDataDownloader:
         self.__minimum_achieved_date = None
         if ticker not in self.downloadable_ticker_information["symbolList"]:
             raise Exception(f"Ticker {ticker} is not downloadable")
-        async with httpx.AsyncClient() as session:
-            tasks = []
-            current_date = start_date
 
-            while current_date < end_date_plus_one:
-                year, month, day = current_date.year, current_date.month, current_date.day
-                if current_date.date() >= date.today() - timedelta(days=1):
-                    start_time = current_date.timestamp() * 1000
-                    end_time = (current_date + timedelta(minutes=1000)).timestamp() * 1000
-                    if spot:
-                        url = f"https://data-api.binance.vision/api/v3/klines?symbol={ticker}&interval={timeframe}&limit=1000&startTime={start_time}&endTime={end_time}"
-                    else:
-                        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={ticker}&interval={timeframe}&limit=1000&startTime={start_time}&endTime={end_time}"
-                    task = asyncio.create_task(
-                        self.download_and_process(session, url, ticker, current_date, False, tqdm_position))
-                    tasks.append(task)
-                    current_date += timedelta(minutes=1000)
-                elif current_date.month == end_date.month and current_date.year == end_date.year:
-                    # Download daily data for the ending month
-                    url = f"https://data.binance.vision/data/{prefix}/daily/klines/{ticker}/{timeframe}/{ticker}-{timeframe}-{year}-{month:02d}-{day:02d}.zip"
-                    task = asyncio.create_task(
-                        self.download_and_process(session, url, ticker, current_date, True, tqdm_position))
-                    tasks.append(task)
-                    current_date += timedelta(days=1)
+        tasks = []
+        current_date = start_date
 
+        while current_date < end_date_plus_one:
+            year, month, day = current_date.year, current_date.month, current_date.day
+            if current_date.date() >= date.today() - timedelta(days=1):
+                start_time = current_date.timestamp() * 1000
+                end_time = (current_date + timedelta(minutes=1000)).timestamp() * 1000
+                if spot:
+                    url = f"https://data-api.binance.vision/api/v3/klines?symbol={ticker}&interval={timeframe}&limit=1000&startTime={start_time}&endTime={end_time}"
                 else:
-                    # Download monthly data for full months
-                    url = f"https://data.binance.vision/data/{prefix}/monthly/klines/{ticker}/{timeframe}/{ticker}-{timeframe}-{year}-{month:02d}.zip"
-                    task = asyncio.create_task(
-                        self.download_and_process(session, url, ticker, current_date, True, tqdm_position))
-                    tasks.append(task)
-                    # add one month to the current date setting the day to be the first day of the month
-                    current_date = current_date.replace(day=1) + relativedelta(months=1)
-            if self.use_pbar:
-                self.pbars[tqdm_position] = tqdm.tqdm(total=len(tasks), position=tqdm_position,
-                                                      desc=f'DOWN {ticker}-{timeframe}, {start_date.date()} to {end_date.date()}')
-            combined_df = None
-            for cor in asyncio.as_completed(tasks):
+                    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={ticker}&interval={timeframe}&limit=1000&startTime={start_time}&endTime={end_time}"
+                task = asyncio.create_task(
+                    self.download_and_process(url, ticker, current_date, False))
+                tasks.append(task)
+                current_date += timedelta(minutes=1000)
+            elif current_date.month == end_date.month and current_date.year == end_date.year:
+                # Download daily data for the ending month
+                url = f"https://data.binance.vision/data/{prefix}/daily/klines/{ticker}/{timeframe}/{ticker}-{timeframe}-{year}-{month:02d}-{day:02d}.zip"
+                task = asyncio.create_task(
+                    self.download_and_process(url, ticker, current_date, True))
+                tasks.append(task)
+                current_date += timedelta(days=1)
+
+            else:
+                # Download monthly data for full months
+                url = f"https://data.binance.vision/data/{prefix}/monthly/klines/{ticker}/{timeframe}/{ticker}-{timeframe}-{year}-{month:02d}.zip"
+                task = asyncio.create_task(
+                    self.download_and_process(url, ticker, current_date, True))
+                tasks.append(task)
+                # add one month to the current date setting the day to be the first day of the month
+                current_date = current_date.replace(day=1) + relativedelta(months=1)
+        logger.info(f'DOWN {ticker}-{timeframe}, {start_date.date()} to {end_date.date()}')
+        combined_df = None
+        for cor in asyncio.as_completed(tasks):
+            try:
                 df = await cor
-                if combined_df is None:
-                    combined_df = df
-                else:
-                    combined_df = pl.concat([combined_df, df], how="vertical")
-            combined_df = combined_df.unique(subset=["date"]).sort("date")
+            except Exception as e:
+                df = None
+                logger.exception(e)
+            if df is None:
+                continue
+            if combined_df is None:
+                combined_df = df
+            else:
+                combined_df = pl.concat([combined_df, df], how="vertical")
+        combined_df = combined_df.unique(subset=["date"]).sort("date")
 
-            if combined_df.shape[0] == 0:
-                raise Exception(f"No data found for {ticker} between {start_date} and {end_date}")
-            if self.use_pbar:
-                self.pbars[tqdm_position].close()
-                del self.pbars[tqdm_position]
-            return ticker, timeframe, combined_df
+        if combined_df.shape[0] == 0:
+            raise Exception(f"No data found for {ticker} between {start_date} and {end_date}")
+        return ticker, timeframe, combined_df
 
     async def __fetch_downloadable_tickers(self):
         async with httpx.AsyncClient() as session:
@@ -330,10 +318,8 @@ class BinanceDataDownloader:
                 raise Exception(f"Failed to fetch downloadable tickers, {result}")
             return result["data"]
 
-    def __init__(self, use_pbar=True, ignore_extras=True):
+    def __init__(self, ignore_extras=True):
         if ignore_extras:
             self.ignore = ["taker_buy_volume", "count"]
         self.max_retry_count = None
-        self.use_pbar = use_pbar
-        self.pbars = {}
         self.downloadable_ticker_information = None
